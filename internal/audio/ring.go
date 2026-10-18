@@ -110,3 +110,12 @@ func (r *pcmRing) Close() {
 	r.notFull.Broadcast()
 	r.notEmpty.Broadcast()
 }
+
+// Reset drops all buffered samples and wakes blocked writers. It is used on
+// resume-from-pause so stale audio is not replayed.
+func (r *pcmRing) Reset() {
+	r.mu.Lock()
+	r.r, r.w, r.n = 0, 0, 0
+	r.mu.Unlock()
+	r.notFull.Broadcast()
+}

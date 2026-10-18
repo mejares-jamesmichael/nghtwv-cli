@@ -165,6 +165,17 @@ func (o *pulseOutput) Write(frames []float32) error {
 	return nil
 }
 
+func (o *pulseOutput) Flush() error {
+	o.mu.Lock()
+	ring, closed := o.ring, o.closed
+	o.mu.Unlock()
+	if ring == nil || closed {
+		return ErrClosed
+	}
+	ring.Reset()
+	return nil
+}
+
 func (o *pulseOutput) Underflow() bool {
 	o.mu.Lock()
 	starved, stream := o.starved, o.stream

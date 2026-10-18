@@ -291,6 +291,17 @@ func (o *wasapiOutput) Write(frames []float32) error {
 	return nil
 }
 
+func (o *wasapiOutput) Flush() error {
+	o.mu.Lock()
+	ring, closed := o.ring, o.closed
+	o.mu.Unlock()
+	if ring == nil || closed {
+		return ErrClosed
+	}
+	ring.Reset()
+	return nil
+}
+
 func (o *wasapiOutput) markStarved() {
 	o.mu.Lock()
 	o.starved = true
