@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"time"
@@ -28,17 +29,18 @@ func main() {
 		device = flag.String("device", "", "stable device name to play through (empty = backend default)")
 		secs   = flag.Float64("secs", 10, "seconds to play")
 		volume = flag.Float64("volume", 0.6, "software gain, 0..1")
+		tone   = flag.Bool("tone", false, "play an 880Hz beep pattern instead of the stream")
 		url    = flag.String("url", defaultURL, "stream URL")
 		rate   = flag.Int("rate", 44100, "output sample rate")
 	)
 	flag.Parse()
-	if err := run(*list, *device, *secs, *volume, *url, *rate); err != nil {
+	if err := run(*list, *device, *secs, *volume, *tone, *url, *rate); err != nil {
 		fmt.Fprintln(os.Stderr, "audiopoc:", err)
 		os.Exit(1)
 	}
 }
 
-func run(list bool, device string, secs, volume float64, url string, rate int) error {
+func run(list bool, device string, secs, volume float64, tone bool, url string, rate int) error {
 	out, err := audio.NewOutput(rate)
 	if err != nil {
 		return err
@@ -72,6 +74,12 @@ func run(list bool, device string, secs, volume float64, url string, rate int) e
 		}
 		chosen = def.Name + " (default)"
 	}
+
+	if tone {
+		fmt.Printf("\nplaying a three-beep pattern for %.0fs through %s at gain %.2f\n", secs, chosen, volume)
+		return playTone(out, device, rate, secs, volume)
+	}
+
 	fmt.Printf("\nplaying %s for %.0fs through %s at gain %.2f\n", url, secs, chosen, volume)
 
 	body, stream, format, err := openStream(url)
@@ -121,6 +129,44 @@ func run(list bool, device string, secs, volume float64, url string, rate int) e
 	}
 
 	fmt.Printf("wrote %d frames (%.1fs), underflow=%v\n", written, float64(written)/float64(rate), out.Underflow())
+	if reporter, ok := out.(audio.ErrReporter); ok && reporter.Err() != nil {
+		return reporter.Err()
+	}
+	return nil
+}
+
+// playTone writes a repeating three-beep pattern (0.2s on, 0.2s off, three
+// times, then a one-second pause) through the output. The radio stream alone
+// is hard to pick out of other players of the same station; the beeps are
+// unmistakable.
+func playTone(out audio.Output, device string, rate int, secs, volume float64) error {
+	if err := out.Open(device); err != nil {
+		return err
+	}
+	const frequency = 880.0 // A5
+	beep := func(frame int64) bool {
+		cycle := math.Mod(float64(frame)/float64(rate), 2.0)
+		return cycle < 0.2 || (cycle >= 0.4 && cycle < 0.6) || (cycle >= 0.8 && cycle < 1.0)
+	}
+	const chunk = 441 // 10ms at 44.1kHz
+	buf := make([]float32, chunk*2)
+	var frame int64
+	deadline := time.Now().Add(time.Duration(secs * float64(time.Second)))
+	for time.Now().Before(deadline) {
+		for i := 0; i < chunk; i++ {
+			var sample float32
+			if beep(frame) {
+				sample = float32(math.Sin(2*math.Pi*frequency*float64(frame)/float64(rate))) * float32(volume)
+			}
+			buf[2*i] = sample
+			buf[2*i+1] = sample
+			frame++
+		}
+		if err := out.Write(buf); err != nil {
+			return fmt.Errorf("write: %w", err)
+		}
+	}
+	fmt.Printf("wrote %d frames (%.1fs), underflow=%v\n", frame, float64(frame)/float64(rate), out.Underflow())
 	if reporter, ok := out.(audio.ErrReporter); ok && reporter.Err() != nil {
 		return reporter.Err()
 	}
