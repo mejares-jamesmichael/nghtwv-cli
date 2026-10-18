@@ -113,6 +113,7 @@ type Engine struct {
 	err     error
 	runCtx  context.Context
 	cancel  context.CancelFunc
+	done    chan struct{} // closed when the run goroutine exits
 }
 
 // EngineOption configures an Engine.
@@ -177,15 +178,20 @@ func (e *Engine) Play() {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	e.running = true
 	e.paused = false
 	e.runCtx = ctx
 	e.cancel = cancel
+	e.done = done
 	e.state = StateBuffering
 	e.mu.Unlock()
 
 	e.spectrum.Start(ctx)
-	go e.run(ctx)
+	go func() {
+		defer close(done)
+		e.run(ctx)
+	}()
 }
 
 // Pause keeps the stream connected and the decoder running (so playback
@@ -202,23 +208,30 @@ func (e *Engine) Pause() {
 	e.mu.Unlock()
 }
 
-// Stop cancels playback and the spectrum analyzer. The output stays open.
+// Stop stops playback: it cancels the decode loop and the spectrum analyzer,
+// drops queued audio and waits for the loop to exit, so nothing can play or
+// be written after it returns. The output stays open for a later Play.
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	if !e.running {
 		e.mu.Unlock()
 		return
 	}
-	cancel := e.cancel
+	cancel, done := e.cancel, e.done
 	e.running = false
 	e.paused = false
 	e.runCtx = nil
 	e.cancel = nil
+	e.done = nil
 	e.state = StateStopped
 	e.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
+
+	cancel()
+	// Wake a decode loop blocked on a full ring, then wait for it to exit so
+	// no write can land behind the final flush.
+	_ = e.out.Flush()
+	<-done
+	_ = e.out.Flush()
 }
 
 // SetVolume sets the software volume (0..100, clamped).
@@ -275,7 +288,7 @@ func (e *Engine) run(ctx context.Context) {
 				return
 			}
 			e.setError(err)
-			e.setState(StateBuffering)
+			e.setReconnectState()
 		} else {
 			backoff = e.backoffBase
 			e.setError(nil)
@@ -291,6 +304,9 @@ func (e *Engine) run(ctx context.Context) {
 				e.setState(StateStopped)
 				return
 			}
+			// The stream ended or failed; report buffering while it is
+			// retried instead of a stale "playing".
+			e.setReconnectState()
 		}
 		if !sleepCtx(ctx, backoff) {
 			return
@@ -401,6 +417,16 @@ func (e *Engine) gain() float32 {
 func (e *Engine) setState(state State) {
 	e.mu.Lock()
 	e.state = state
+	e.mu.Unlock()
+}
+
+// setReconnectState reports buffering while a stream is being retried, unless
+// the user asked for pause.
+func (e *Engine) setReconnectState() {
+	e.mu.Lock()
+	if !e.paused {
+		e.state = StateBuffering
+	}
 	e.mu.Unlock()
 }
 

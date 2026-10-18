@@ -53,10 +53,11 @@ type Output interface {
 	// Write sends interleaved stereo samples. len(frames) must be even.
 	Write(frames []float32) error
 	// Flush drops audio buffered in the backend so the next Write starts from
-	// an empty buffer. It is used on pause (drop queued audio so silence
-	// arrives promptly) and on resume (drop buffered silence so playback
-	// resumes at the live edge). Backends may keep a small buffer of their
-	// own that cannot be recalled; Flush must not block.
+	// an empty buffer. It must never block and must wake writers blocked on
+	// a full buffer. It is used on pause (drop queued audio so silence
+	// arrives promptly), on resume (drop buffered silence so playback
+	// resumes at the live edge) and on stop (leave nothing behind).
+	// Backends may keep a small buffer of their own that cannot be recalled.
 	Flush() error
 	// Underflow reports whether the backend inserted silence because the
 	// producer fell behind since Open.

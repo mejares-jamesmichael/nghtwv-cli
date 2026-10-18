@@ -16,11 +16,15 @@ var format44100 = beep.Format{SampleRate: 44100, NumChannels: 2, Precision: 4}
 
 // fakeOutput records everything written to it. pace simulates a draining
 // device so pause/stop timing is observable; ops records the write/flush
-// ordering, which is what pause correctness depends on.
+// ordering, which is what pause and stop correctness depend on. A non-nil
+// block models a writer parked on a full ring: Flush releases it, like the
+// real ring's reset does.
 type fakeOutput struct {
 	mu       sync.Mutex
 	frames   []float32
 	ops      []string
+	blocked  int
+	block    chan struct{}
 	pace     time.Duration
 	writeErr error
 }
@@ -34,6 +38,15 @@ func (f *fakeOutput) Close() error               { return nil }
 func (f *fakeOutput) Write(p []float32) error {
 	if f.pace > 0 {
 		time.Sleep(f.pace)
+	}
+	f.mu.Lock()
+	block := f.block
+	if block != nil {
+		f.blocked++
+	}
+	f.mu.Unlock()
+	if block != nil {
+		<-block
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -51,9 +64,30 @@ func (f *fakeOutput) Write(p []float32) error {
 
 func (f *fakeOutput) Flush() error {
 	f.mu.Lock()
+	f.releaseBlockedLocked()
 	f.ops = append(f.ops, "flush")
 	f.mu.Unlock()
 	return nil
+}
+
+// releaseBlocked frees a writer parked on the fake's gate.
+func (f *fakeOutput) releaseBlocked() {
+	f.mu.Lock()
+	f.releaseBlockedLocked()
+	f.mu.Unlock()
+}
+
+func (f *fakeOutput) releaseBlockedLocked() {
+	if f.block != nil {
+		close(f.block)
+		f.block = nil
+	}
+}
+
+func (f *fakeOutput) blockedWrites() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.blocked
 }
 
 func (f *fakeOutput) timeline() []string {
@@ -319,6 +353,90 @@ func TestEngineStopsRetryingWhenDeviceFails(t *testing.T) {
 	}
 	if err := engine.Err(); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Err() = %v; want ErrClosed", err)
+	}
+}
+
+func TestEngineStopFlushesQueuedAudio(t *testing.T) {
+	out := &fakeOutput{pace: time.Millisecond}
+	opener := func(ctx context.Context) (Stream, beep.Format, error) {
+		return &constStream{remain: 1 << 30, value: 1}, format44100, nil
+	}
+	engine := NewEngine(out, 44100, opener, WithChunkFrames(64))
+	engine.Play()
+	waitFor(t, "audio", func() bool { return len(out.written()) > 128 })
+
+	engine.Stop()
+	if state := engine.Status().State; state != StateStopped {
+		t.Fatalf("state = %v; want stopped", state)
+	}
+	// Stop waits for the decode loop, so the last operation must be a flush:
+	// no samples may be written after it, and the ring must be empty.
+	ops := out.timeline()
+	if len(ops) == 0 || ops[len(ops)-1] != "flush" {
+		t.Fatalf("ops after Stop = %v; want a flush last", ops)
+	}
+	mark := len(out.timeline())
+	time.Sleep(30 * time.Millisecond)
+	if got := out.timeline(); len(got) != mark {
+		t.Fatalf("pump wrote %v after Stop returned", got[mark:])
+	}
+}
+
+func TestEngineStopWhileWriteIsBlocked(t *testing.T) {
+	out := &fakeOutput{block: make(chan struct{})}
+	defer out.releaseBlocked()
+	opener := func(ctx context.Context) (Stream, beep.Format, error) {
+		return &constStream{remain: 1 << 30, value: 1}, format44100, nil
+	}
+	engine := NewEngine(out, 44100, opener, WithChunkFrames(64))
+	engine.Play()
+	defer engine.Stop()
+	waitFor(t, "blocked write", func() bool { return out.blockedWrites() > 0 })
+
+	// Flush must wake the parked writer, otherwise Stop would hang.
+	stopped := make(chan struct{})
+	go func() {
+		engine.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop hung while the decode loop was blocked in Write")
+	}
+}
+
+func TestEngineReportsBufferingWhenStreamEnds(t *testing.T) {
+	out := &fakeOutput{pace: time.Millisecond}
+	var mu sync.Mutex
+	attempts := 0
+	opener := func(ctx context.Context) (Stream, beep.Format, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		attempts++
+		return &constStream{remain: 6400, value: 1}, format44100, nil
+	}
+	// The backoff is far longer than the test, so a buffering state can only
+	// come from the drained stream, never from a failed retry.
+	engine := NewEngine(out, 44100, opener,
+		WithChunkFrames(64), WithBackoff(2*time.Second, 2*time.Second))
+	engine.Play()
+	defer engine.Stop()
+
+	waitFor(t, "playing", func() bool { return engine.Status().State == StatePlaying })
+	waitFor(t, "buffering after the stream drained", func() bool {
+		return engine.Status().State == StateBuffering
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("opener attempts = %d; want 1 during the backoff", got)
+	}
+	if state := engine.Status().State; state != StateBuffering {
+		t.Fatalf("state = %v; want buffering during the outage", state)
 	}
 }
 
