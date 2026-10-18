@@ -17,11 +17,13 @@ import (
 // fakePlayback records every panel action (fake-player tests: no mpv,
 // no sockets).
 type fakePlayback struct {
-	st      player.State
-	toggleN int
-	stopN   int
-	volumes []int
-	err     error
+	st          player.State
+	toggleN     int
+	stopN       int
+	volumes     []int
+	outputNames []string
+	outputs     []mpv.Device
+	err         error
 }
 
 func (f *fakePlayback) Status(context.Context) player.State { return f.st }
@@ -39,22 +41,31 @@ func (f *fakePlayback) Volume(_ context.Context, volume int) (player.State, erro
 	return f.st, f.err
 }
 
-func (f *fakePlayback) SetOutput(context.Context, string) (player.State, error) {
+func (f *fakePlayback) SetOutput(_ context.Context, device string) (player.State, error) {
+	f.outputNames = append(f.outputNames, device)
+	f.st.Output = device
 	return f.st, f.err
 }
 
-func (f *fakePlayback) Outputs(context.Context) ([]mpv.Device, error) { return nil, f.err }
+func (f *fakePlayback) Outputs(context.Context) ([]mpv.Device, error) { return f.outputs, f.err }
 
-// fakeMeta counts metadata fetches (fake-plaza tests: no HTTP).
+// fakeMeta counts plaza fetches (fake-plaza tests: no HTTP).
 type fakeMeta struct {
-	data *plaza.Metadata
-	err  error
-	n    int
+	data    *plaza.Metadata
+	history *plaza.History
+	err     error
+	n       int
+	hn      int
 }
 
 func (f *fakeMeta) Metadata(context.Context) (*plaza.Metadata, error) {
 	f.n++
 	return f.data, f.err
+}
+
+func (f *fakeMeta) History(context.Context) (*plaza.History, error) {
+	f.hn++
+	return f.history, f.err
 }
 
 // press feeds a key to the model and returns the folded model + command.
@@ -65,6 +76,12 @@ func press(m Model, name, text string) (Model, tea.Cmd) {
 		km = tea.Key{Code: tea.KeySpace}
 	case name == "esc" && text == "":
 		km = tea.Key{Code: tea.KeyEscape}
+	case name == "enter" && text == "":
+		km = tea.Key{Code: tea.KeyEnter}
+	case name == "up" && text == "":
+		km = tea.Key{Code: tea.KeyUp}
+	case name == "down" && text == "":
+		km = tea.Key{Code: tea.KeyDown}
 	case text != "":
 		km = tea.Key{Code: rune(text[0]), Text: text}
 	default:

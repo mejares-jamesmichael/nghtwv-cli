@@ -262,6 +262,40 @@ func playerCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Cont
 	return 0
 }
 
+// tuiDebugProgram wraps the panel to trace every message (NGHTWV_DEBUG=1
+// probe tracing, like the IPC layer). It keeps the live model value so
+// folds accumulate exactly like the plain program.
+type tuiDebugProgram struct {
+	inner tea.Model
+	f     *os.File
+}
+
+func (d *tuiDebugProgram) Init() tea.Cmd { return d.inner.Init() }
+
+func (d *tuiDebugProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if d.f != nil {
+		if k, ok := msg.(tea.KeyPressMsg); ok {
+			fmt.Fprintf(d.f, "KEY %q code=%d text=%q\n", k.String(), k.Code, k.Text)
+		} else {
+			fmt.Fprintf(d.f, "%T\n", msg)
+		}
+	}
+	next, cmd := d.inner.Update(msg)
+	d.inner = next
+	return d, cmd
+}
+
+func (d *tuiDebugProgram) View() tea.View {
+	v := d.inner.View()
+	if d.f != nil {
+		if m, ok := d.inner.(tui.Model); ok {
+			fmt.Fprintf(d.f, "VIEW pickerOpen=%v devices=%d loaded=%v err=%q help=%v\n",
+				m.PickerOpen(), len(m.Devices()), m.OutputsLoaded(), m.OutputsErr(), m.HelpOpen())
+		}
+	}
+	return v
+}
+
 // runTUI boots the panel model over the real seams. A TTY is required
 // (the panel needs raw input); non-interactive invocations get a friendly
 // one-shot pointer instead of a raw error.
@@ -273,7 +307,18 @@ func runTUI(stdout, stderr io.Writer) int {
 	}
 
 	model := tui.New(pl, newPlaza())
-	program := tea.NewProgram(model)
+	var program *tea.Program
+	if os.Getenv("NGHTWV_DEBUG") != "" {
+		f, ferr := os.CreateTemp("", "nghtwv-tui-debug-*")
+		if ferr == nil {
+			defer f.Close()
+			fmt.Fprintln(os.Stderr, "tui probe log:", f.Name())
+			program = tea.NewProgram(&tuiDebugProgram{inner: model, f: f})
+		}
+	}
+	if program == nil {
+		program = tea.NewProgram(model)
+	}
 	_, runErr := program.Run()
 	if runErr == nil {
 		return 0
