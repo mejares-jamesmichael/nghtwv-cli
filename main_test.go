@@ -66,10 +66,7 @@ func TestRunNoArgs(t *testing.T) {
 }
 
 func TestRunPendingCommands(t *testing.T) {
-	for _, name := range []string{
-		"status", "metadata", "history", "backgrounds", "outputs",
-		"output", "play", "pause", "toggle", "stop", "volume",
-	} {
+	for _, name := range []string{"metadata", "history", "backgrounds"} {
 		var stdout, stderr bytes.Buffer
 		if code := run([]string{name}, &stdout, &stderr); code != 1 {
 			t.Errorf("%s: exit code = %d, want 1", name, code)
@@ -77,5 +74,33 @@ func TestRunPendingCommands(t *testing.T) {
 		if !strings.Contains(stderr.String(), "not implemented yet") {
 			t.Errorf("%s: should explain it is pending, stderr = %q", name, stderr.String())
 		}
+	}
+}
+
+func TestRunVolumeArgParsing(t *testing.T) {
+	// Bad volume grammar is a usage error (exit 2), before any player wiring.
+	cases := []struct {
+		args []string
+		code int
+	}{
+		{[]string{"volume"}, 2},
+		{[]string{"volume", "nan"}, 2},
+		{[]string{"volume", "1", "2"}, 2},
+	}
+	for _, c := range cases {
+		var stdout, stderr bytes.Buffer
+		if code := run(c.args, &stdout, &stderr); code != c.code {
+			t.Errorf("run(%v) = %d, want %d", c.args, code, c.code)
+		}
+	}
+}
+
+func TestRunOutputArgArity(t *testing.T) {
+	// Too many arguments is a usage error before any wiring happens.
+	// The zero-arg / one-arg cases need real IPC, so only the arity
+	// violation is checked here.
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"output", "a", "b"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("output with two args = %d, want 2", code)
 	}
 }
