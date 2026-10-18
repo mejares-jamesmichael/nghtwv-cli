@@ -355,7 +355,15 @@ func normalizeOutput(device string) string {
 
 // neutral is the honest idle state when mpv is absent or unreachable.
 func (p *Player) neutral() State {
-	s, err := p.store.Load()
+	return NeutralState(p.store)
+}
+
+// NeutralState is the honest idle state for an unreachable endpoint:
+// remembered volume and output, nothing playing (parity: state() collapse
+// to defaults on any IPC failure). Exported so the service client reports
+// the same state when no service is running.
+func NeutralState(store Store) State {
+	s, err := store.Load()
 	if err != nil {
 		s = config.Settings{}
 	}

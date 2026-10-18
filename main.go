@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"charm.land/bubbletea/v2"
@@ -23,6 +25,7 @@ import (
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/platform"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/plaza"
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/service"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/tui"
 )
 
@@ -45,7 +48,7 @@ Commands:
   play          start the stream or resume it
   pause         pause playback
   toggle        start/pause playback
-  stop          stop playback and shut down mpv
+  stop          stop playback and shut down the player service
   volume N      set the volume, clamped to 0-100
   version       print the binary version as JSON
   help          show this help
@@ -75,25 +78,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "version":
 		return cmdVersion(rest, stdout, stderr)
+	case "service":
+		return cmdService(rest, stdout, stderr)
 	case "status":
-		return playerCmd(rest, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			return pl.Status(ctx), nil
+		return clientCmd(rest, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			return cl.StatusChecked(ctx)
 		})
 	case "play":
-		return playerCmd(rest, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			return pl.Play(ctx)
+		return clientCmd(rest, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			return cl.Play(ctx)
 		})
 	case "pause":
-		return playerCmd(rest, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			return pl.Pause(ctx)
+		return clientCmd(rest, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			return cl.Pause(ctx)
 		})
 	case "toggle":
-		return playerCmd(rest, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			return pl.Toggle(ctx)
+		return clientCmd(rest, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			return cl.Toggle(ctx)
 		})
 	case "stop":
-		return playerCmd(rest, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			return nil, pl.Stop(ctx)
+		return clientCmd(rest, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			return nil, cl.Stop(ctx)
 		})
 	case "volume":
 		n, uerr := parseVolume(rest)
@@ -102,12 +107,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprint(stderr, usageText)
 			return 2
 		}
-		return playerCmd(nil, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			return pl.Volume(ctx, n)
+		return clientCmd(nil, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			return cl.Volume(ctx, n)
 		})
 	case "outputs":
-		return playerCmd(rest, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			devices, err := pl.Outputs(ctx)
+		return clientCmd(rest, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			devices, err := cl.Outputs(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -122,8 +127,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprint(stderr, usageText)
 			return 2
 		}
-		return playerCmd(nil, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
-			return pl.SetOutput(ctx, device)
+		return clientCmd(nil, stdout, stderr, func(ctx context.Context, cl *service.Client) (any, error) {
+			return cl.SetOutput(ctx, device)
 		})
 	case "metadata":
 		return plazaCmd(rest, stdout, stderr, func(ctx context.Context, c *plaza.Client) (any, error) {
@@ -231,9 +236,9 @@ func plazaCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Conte
 	return 0
 }
 
-// playerCmd wires a fresh player for the endpoint and executes fn, writing
-// fn's result as JSON (or an empty success when nil result and nil error).
-func playerCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Context, pl *player.Player) (any, error)) int {
+// clientCmd wires a fresh service client and executes fn, writing fn's
+// result as JSON (or an empty success when nil result and nil error).
+func clientCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Context, cl *service.Client) (any, error)) int {
 	if len(args) > 0 {
 		fmt.Fprintln(stderr, "this command takes no arguments")
 		fmt.Fprint(stderr, usageText)
@@ -242,12 +247,12 @@ func playerCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Cont
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pl, err := newPlayer()
+	cl, err := newPlayback()
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
-	result, err := fn(ctx, pl)
+	result, err := fn(ctx, cl)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
@@ -259,6 +264,49 @@ func playerCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Cont
 		fmt.Fprintf(stderr, "encode: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+// cmdService runs the hidden service verb in the foreground: one process
+// owns the audio backend and serves clients until a frozen stop request or
+// a signal shuts it down. Detached spawns (service.startService) point
+// here; stdout/stderr are the void in that case, so nothing is printed on
+// the happy path.
+func cmdService(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "the service command takes no arguments")
+		return 2
+	}
+	endpoint, err := platform.ServiceEndpointPath()
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	// Double start (or a lost spawn race): if something already answers the
+	// endpoint, this instance exits quietly instead of stealing it.
+	if service.Probe(context.Background(), endpoint) {
+		return 0
+	}
+	backend, err := newBackend()
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	ln, err := service.Listen(endpoint)
+	if err != nil {
+		fmt.Fprintf(stderr, "listen %s: %v\n", endpoint, err)
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := service.NewServer(backend, ln).Serve(ctx); err != nil {
+		fmt.Fprintf(stderr, "service: %v\n", err)
+		return 1
+	}
+	// Leave no socket file behind; a signal shutdown leaves playback alone
+	// (a later start re-attaches), while a stop request already stopped it.
+	_ = platform.CleanStaleEndpoint(endpoint)
 	return 0
 }
 
@@ -300,13 +348,13 @@ func (d *tuiDebugProgram) View() tea.View {
 // (the panel needs raw input); non-interactive invocations get a friendly
 // one-shot pointer instead of a raw error.
 func runTUI(stdout, stderr io.Writer) int {
-	pl, err := newPlayer()
+	cl, err := newPlayback()
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
 
-	model := tui.New(pl, newPlaza())
+	model := tui.New(cl, newPlaza())
 	var program *tea.Program
 	if os.Getenv("NGHTWV_DEBUG") != "" {
 		f, ferr := os.CreateTemp("", "nghtwv-tui-debug-*")
@@ -332,11 +380,32 @@ func runTUI(stdout, stderr io.Writer) int {
 	return 1
 }
 
-// newPlayer resolves runtime paths and wires supervisor + settings store +
-// player. The remembered device is passed to the spawn config so mpv starts
-// on it (parity: --audio-device at launch); if the device vanished the
-// player falls back to auto and any later SetOutput fixes the record.
-func newPlayer() (*player.Player, error) {
+// newPlayback resolves the service endpoint and lock and wires the client
+// the one-shots and the panel drive. The service is attached — or started
+// detached — on the first verb that needs it.
+func newPlayback() (*service.Client, error) {
+	endpoint, err := platform.ServiceEndpointPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve service endpoint: %w", err)
+	}
+	lock, err := platform.ServiceLockPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve service lock: %w", err)
+	}
+	return service.NewClient(service.Config{
+		Endpoint: endpoint,
+		LockPath: lock,
+		Clean:    func() { _ = platform.CleanStaleEndpoint(endpoint) },
+	}), nil
+}
+
+// newBackend wires the backend the service dispatches onto: the mpv-backed
+// player (the only backend in this stage; the built-in audio engine lands
+// behind the same seam next). The remembered device is passed to the mpv
+// spawn config so it starts on it (parity: --audio-device at launch); if
+// the device vanished the player falls back to auto and a later SetOutput
+// fixes the record.
+func newBackend() (*player.Player, error) {
 	endpoint, err := platform.EndpointPath()
 	if err != nil {
 		return nil, fmt.Errorf("resolve IPC endpoint: %w", err)
@@ -355,15 +424,8 @@ func newPlayer() (*player.Player, error) {
 		StreamURL:   player.StreamURL,
 		AudioDevice: settings.Output,
 	}, mpv.NewDialer(endpoint))
-	return player.New(sup.Client(), sup, settingsStore{}), nil
+	return player.New(sup.Client(), sup, config.Store{}), nil
 }
-
-// settingsStore adapts config's package functions to the player's store
-// interface.
-type settingsStore struct{}
-
-func (settingsStore) Load() (config.Settings, error) { return config.Load() }
-func (settingsStore) Save(s config.Settings) error   { return config.Save(s) }
 
 func writeJSON(w io.Writer, v any) error {
 	b, err := json.Marshal(v)

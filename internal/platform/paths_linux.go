@@ -42,9 +42,30 @@ func LockPath() (string, error) {
 	return filepath.Join(dir, "player.lock"), nil
 }
 
-// CleanStaleEndpoint removes a dead socket file left behind by a crashed
-// mpv. Harmless when the file is already gone or the endpoint is alive —
-// the supervisor unlinks only after a failed probe.
+// ServiceEndpointPath returns the persistent player service's IPC socket
+// path. It coexists with the mpv socket during the backend migration.
+func ServiceEndpointPath() (string, error) {
+	dir, err := RuntimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "service.sock"), nil
+}
+
+// ServiceLockPath returns the service launch-lock file path, creating the
+// runtime dir. Separate from the mpv lock: clients serialise service
+// starts while the service itself serialises mpv starts.
+func ServiceLockPath() (string, error) {
+	dir, err := RuntimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "service.lock"), nil
+}
+
+// CleanStaleEndpoint removes a dead endpoint artifact (an mpv or service
+// socket file left behind by a crash). Harmless when the file is already
+// gone or the endpoint is alive — callers unlink only after a failed probe.
 func CleanStaleEndpoint(path string) error {
 	return os.Remove(path)
 }
