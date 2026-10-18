@@ -65,14 +65,16 @@ func TestRunNoArgs(t *testing.T) {
 	}
 }
 
-func TestRunPendingCommands(t *testing.T) {
+func TestRunPlazaCommandsRejectArgs(t *testing.T) {
+	// The API commands take no arguments; extra words are usage errors
+	// (exit 2) — no network touched on this path.
 	for _, name := range []string{"metadata", "history", "backgrounds"} {
 		var stdout, stderr bytes.Buffer
-		if code := run([]string{name}, &stdout, &stderr); code != 1 {
-			t.Errorf("%s: exit code = %d, want 1", name, code)
+		if code := run([]string{name, "unexpected"}, &stdout, &stderr); code != 2 {
+			t.Errorf("%s: exit code = %d, want 2", name, code)
 		}
-		if !strings.Contains(stderr.String(), "not implemented yet") {
-			t.Errorf("%s: should explain it is pending, stderr = %q", name, stderr.String())
+		if !strings.Contains(stderr.String(), "this command takes no arguments") {
+			t.Errorf("%s: should reject unexpected args, stderr = %q", name, stderr.String())
 		}
 	}
 }

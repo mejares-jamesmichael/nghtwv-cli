@@ -20,6 +20,7 @@ import (
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/mpv"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/platform"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/plaza"
 )
 
 // version is injected at build time:
@@ -33,9 +34,9 @@ Without a command, nghtwv runs the interactive TUI (not implemented yet; planned
 
 Commands:
   status        print playback status as JSON
-  metadata      print now-playing metadata from the Plaza API as JSON (pending)
-  history       print up to 10 recent tracks as JSON (pending)
-  backgrounds   print a random background pick as JSON (pending)
+  metadata      print now-playing metadata from the Plaza API as JSON
+  history       print up to 10 recent tracks as JSON
+  backgrounds   print a random background pick as JSON
   outputs       list audio output devices as JSON
   output [DEV]  change or clear the remembered output device ("" = auto)
   play          start the stream or resume it
@@ -123,9 +124,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return playerCmd(nil, stdout, stderr, func(ctx context.Context, pl *player.Player) (any, error) {
 			return pl.SetOutput(ctx, device)
 		})
-	case "metadata", "history", "backgrounds":
-		fmt.Fprintf(stderr, "%q is not implemented yet (plaza API client lands in phase 3)\n", name)
-		return 1
+	case "metadata":
+		return plazaCmd(rest, stdout, stderr, func(ctx context.Context, c *plaza.Client) (any, error) {
+			return c.Metadata(ctx)
+		})
+	case "history":
+		return plazaCmd(rest, stdout, stderr, func(ctx context.Context, c *plaza.Client) (any, error) {
+			return c.History(ctx)
+		})
+	case "backgrounds":
+		return plazaCmd(rest, stdout, stderr, func(ctx context.Context, c *plaza.Client) (any, error) {
+			return c.Backgrounds(ctx)
+		})
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", name)
 		fmt.Fprint(stderr, usageText)
@@ -187,6 +197,37 @@ func toOutputEntries(devices []mpv.Device) []outputEntry {
 		entries = append(entries, outputEntry{ID: d.Name, Label: label})
 	}
 	return entries
+}
+
+// newPlaza binds the API client to the versioned User-Agent.
+func newPlaza() *plaza.Client {
+	return plaza.New("nghtwv/" + version)
+}
+
+// plazaCmd wires the API client and executes fn, writing fn's result as
+// JSON or the parity error message on stderr (exit 1).
+func plazaCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Context, c *plaza.Client) (any, error)) int {
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "this command takes no arguments")
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	result, err := fn(ctx, newPlaza())
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	if result == nil {
+		return 0
+	}
+	if err := writeJSON(stdout, result); err != nil {
+		fmt.Fprintf(stderr, "encode: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // playerCmd wires a fresh player for the endpoint and executes fn, writing
