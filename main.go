@@ -16,11 +16,14 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbletea/v2"
+
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/config"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/mpv"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/platform"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/plaza"
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/tui"
 )
 
 // version is injected at build time:
@@ -30,7 +33,7 @@ var version = "dev"
 
 const usageText = `Usage: nghtwv [command]
 
-Without a command, nghtwv runs the interactive TUI (not implemented yet; planned phase 4).
+Without a command, nghtwv runs the interactive panel (needs a terminal).
 
 Commands:
   status        print playback status as JSON
@@ -62,9 +65,7 @@ func main() {
 // can exercise every path without spawning the binary.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "the TUI is not implemented yet (planned phase 4)")
-		fmt.Fprint(stderr, usageText)
-		return 1
+		return runTUI(stdout, stderr)
 	}
 
 	name, rest := args[0], args[1:]
@@ -259,6 +260,31 @@ func playerCmd(args []string, stdout, stderr io.Writer, fn func(ctx context.Cont
 		return 1
 	}
 	return 0
+}
+
+// runTUI boots the panel model over the real seams. A TTY is required
+// (the panel needs raw input); non-interactive invocations get a friendly
+// one-shot pointer instead of a raw error.
+func runTUI(stdout, stderr io.Writer) int {
+	pl, err := newPlayer()
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+
+	model := tui.New(pl, newPlaza())
+	program := tea.NewProgram(model)
+	_, runErr := program.Run()
+	if runErr == nil {
+		return 0
+	}
+	if strings.Contains(runErr.Error(), "error opening TTY") {
+		fmt.Fprintln(stderr, "nghtwv without a command wants a terminal to show the panel;")
+		fmt.Fprintln(stderr, "for one-shot JSON use: nghtwv {status|metadata|history|backgrounds|outputs|output [DEV]|toggle|play|stop|volume N}")
+		return 1
+	}
+	fmt.Fprintf(stderr, "tui: %v\n", runErr)
+	return 1
 }
 
 // newPlayer resolves runtime paths and wires supervisor + settings store +

@@ -55,13 +55,20 @@ func TestRunUnknownCommand(t *testing.T) {
 	}
 }
 
-func TestRunNoArgs(t *testing.T) {
+func TestRunNoArgsWithoutTTY(t *testing.T) {
+	// In a test there is no terminal on stdin, so the TUI path must bail
+	// out with a helpful pointer instead of hanging or crashing.
 	var stdout, stderr bytes.Buffer
 	if code := run(nil, &stdout, &stderr); code != 1 {
-		t.Fatalf("exit code = %d, want 1 (TUI stub, planned phase 4)", code)
+		t.Fatalf("exit code = %d, want 1 (TUI needs a TTY)", code)
 	}
-	if !strings.Contains(stderr.String(), "not implemented yet") {
-		t.Error("no-args run should explain the TUI is pending")
+	if !strings.Contains(stderr.String(), "terminal") {
+		t.Errorf("non-TTY no-args run should point at the terminal requirement, stderr = %q", stderr.String())
+	}
+	for _, name := range []string{"status", "toggle", "volume"} {
+		if !strings.Contains(stderr.String(), name) {
+			t.Errorf("non-TTY message should list one-shots, missing %q: %q", name, stderr.String())
+		}
 	}
 }
 
