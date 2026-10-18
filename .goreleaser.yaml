@@ -1,0 +1,38 @@
+# GoReleaser v2 config — single static binaries, CGO disabled everywhere.
+# Release matrix per master plan: linux/amd64 + linux/arm64 (tar.gz),
+# windows/amd64 (zip).
+
+version: 2
+
+project_name: nghtwv
+
+builds:
+  - main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "nghtwv_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: false
