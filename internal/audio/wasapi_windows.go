@@ -188,17 +188,22 @@ func (o *wasapiOutput) open(name string) error {
 }
 
 // renderLoop owns the COM handles after Open: it tops up the engine buffer
-// from the ring and releases everything on exit.
+// from the ring, and releases the handles while the apartment is still up.
 func (o *wasapiOutput) renderLoop() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(o.done)
-	defer o.release()
 	if err := comInit(); err != nil {
+		// The apartment never came up; release under a fresh initialization
+		// so the handles are not leaked.
+		_ = withCOM(func() error { o.release(); return nil })
 		o.fail(err)
 		return
 	}
+	// Defers run in reverse, so release() runs first: COM interfaces must be
+	// released before CoUninitialize, and o.done closes only after both.
 	defer ole.CoUninitialize()
+	defer o.release()
 
 	for {
 		select {
@@ -291,6 +296,8 @@ func (o *wasapiOutput) Write(frames []float32) error {
 	return nil
 }
 
+// Flush drops everything the ring has buffered. Audio already handed to the
+// WASAPI engine buffer (up to wasapiBufferDuration) still plays out.
 func (o *wasapiOutput) Flush() error {
 	o.mu.Lock()
 	ring, closed := o.ring, o.closed

@@ -165,6 +165,9 @@ func (o *pulseOutput) Write(frames []float32) error {
 	return nil
 }
 
+// Flush drops everything the ring has buffered. The Pulse server also keeps
+// PlaybackLatency (~300ms) of audio that the library exposes no flush for, so
+// that much may still play out after a pause.
 func (o *pulseOutput) Flush() error {
 	o.mu.Lock()
 	ring, closed := o.ring, o.closed

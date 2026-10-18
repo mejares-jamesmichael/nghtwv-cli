@@ -32,6 +32,8 @@ type options struct {
 	tone     bool
 	engine   bool
 	spectrum bool
+	pauseAt  float64
+	pauseFor float64
 	url      string
 	rate     int
 }
@@ -45,6 +47,8 @@ func main() {
 	flag.BoolVar(&opts.tone, "tone", false, "play an 880Hz beep pattern instead of the stream")
 	flag.BoolVar(&opts.engine, "engine", false, "run the decode engine (reconnect, volume, spectrum) instead of the raw loop")
 	flag.BoolVar(&opts.spectrum, "spectrum", false, "print live band levels while -engine runs")
+	flag.Float64Var(&opts.pauseAt, "pause-at", 0, "seconds into an -engine run to pause (0 disables)")
+	flag.Float64Var(&opts.pauseFor, "pause-for", 2, "seconds to stay paused during -pause-at")
 	flag.StringVar(&opts.url, "url", defaultURL, "stream URL")
 	flag.IntVar(&opts.rate, "rate", 44100, "output sample rate")
 	flag.Parse()
@@ -165,11 +169,24 @@ func runEngine(out audio.Output, opts options) error {
 	engine.Play()
 	defer engine.Stop()
 
-	deadline := time.Now().Add(time.Duration(opts.secs * float64(time.Second)))
+	start := time.Now()
+	deadline := start.Add(time.Duration(opts.secs * float64(time.Second)))
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	paused, resumed := false, false
 	for time.Now().Before(deadline) {
 		<-ticker.C
+		elapsed := time.Since(start).Seconds()
+		if opts.pauseAt > 0 && !paused && elapsed >= opts.pauseAt {
+			engine.Pause()
+			paused = true
+			fmt.Println("--- pause ---")
+		}
+		if paused && !resumed && elapsed >= opts.pauseAt+opts.pauseFor {
+			engine.Play()
+			resumed = true
+			fmt.Println("--- resume ---")
+		}
 		status := engine.Status()
 		snapshot := engine.Spectrum()
 		if opts.spectrum {

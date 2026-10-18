@@ -189,8 +189,10 @@ func (e *Engine) Play() {
 }
 
 // Pause keeps the stream connected and the decoder running (so playback
-// stays at the live edge) but renders silence. Resume flushes audio buffered
-// while paused so stale samples are not replayed.
+// stays at the live edge) but renders silence. Queued audio is flushed as
+// soon as the pause is observed, so at most the backend's own buffer (the
+// Pulse server latency, ~300ms) still plays out. Resume flushes again so the
+// silence buffered while paused is not replayed.
 func (e *Engine) Pause() {
 	e.mu.Lock()
 	if e.running {
@@ -335,10 +337,15 @@ func (e *Engine) pump(ctx context.Context, stream Stream, format beep.Format) er
 		if now := e.isPaused(); now != paused {
 			paused = now
 			if paused {
+				// Drop queued audio right away, otherwise up to the ring's
+				// half second would keep playing behind the silence.
+				if err := e.out.Flush(); err != nil {
+					return err
+				}
 				e.setState(StatePaused)
 			} else {
-				// Drop audio buffered while paused so playback resumes at
-				// the live edge.
+				// Drop the silence buffered while paused so playback resumes
+				// at the live edge.
 				if err := e.out.Flush(); err != nil {
 					return err
 				}
@@ -380,8 +387,9 @@ func (e *Engine) isPaused() bool {
 	return e.paused
 }
 
-// gain is the software volume. The cubic curve matches mpv's default volume
-// response, so persisted values sound the same as they did through mpv.
+// gain is the software volume. mpv's mixer computes pow(volume/100, 3) (see
+// audio_get_gain in mpv's player/audio.c), so the cubic curve keeps every
+// persisted player volume at the same loudness after the engine swap.
 func (e *Engine) gain() float32 {
 	e.mu.Lock()
 	v := e.volume

@@ -3,6 +3,8 @@ package audio
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -13,11 +15,12 @@ import (
 var format44100 = beep.Format{SampleRate: 44100, NumChannels: 2, Precision: 4}
 
 // fakeOutput records everything written to it. pace simulates a draining
-// device so pause/stop timing is observable.
+// device so pause/stop timing is observable; ops records the write/flush
+// ordering, which is what pause correctness depends on.
 type fakeOutput struct {
 	mu       sync.Mutex
 	frames   []float32
-	flushes  int
+	ops      []string
 	pace     time.Duration
 	writeErr error
 }
@@ -38,14 +41,42 @@ func (f *fakeOutput) Write(p []float32) error {
 		return f.writeErr
 	}
 	f.frames = append(f.frames, p...)
+	op := "write:audio"
+	if isSilence(p) {
+		op = "write:silence"
+	}
+	f.ops = append(f.ops, op)
 	return nil
 }
 
 func (f *fakeOutput) Flush() error {
 	f.mu.Lock()
-	f.flushes++
+	f.ops = append(f.ops, "flush")
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeOutput) timeline() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.ops))
+	copy(out, f.ops)
+	return out
+}
+
+func (f *fakeOutput) clearOps() {
+	f.mu.Lock()
+	f.ops = nil
+	f.mu.Unlock()
+}
+
+func isSilence(p []float32) bool {
+	for _, v := range p {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *fakeOutput) written() []float32 {
@@ -54,12 +85,6 @@ func (f *fakeOutput) written() []float32 {
 	out := make([]float32, len(f.frames))
 	copy(out, f.frames)
 	return out
-}
-
-func (f *fakeOutput) flushCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.flushes
 }
 
 // constStream produces a fixed sample value and reports drained once remain
@@ -100,29 +125,38 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func TestEnginePumpsWithVolumeGain(t *testing.T) {
-	out := &fakeOutput{}
-	opener := func(ctx context.Context) (Stream, beep.Format, error) {
-		return &constStream{remain: 4096, value: 1}, format44100, nil
-	}
-	engine := NewEngine(out, 44100, opener,
-		WithVolume(50), WithChunkFrames(256), WithBackoff(time.Millisecond, 4*time.Millisecond))
-	engine.Play()
-	defer engine.Stop()
+func TestEngineVolumeCurve(t *testing.T) {
+	// mpv's mixer (audio_get_gain in player/audio.c) computes
+	// pow(volume/100, 3); these are the gains a persisted player volume
+	// produced through mpv and must still produce here.
+	for _, tc := range []struct {
+		volume int
+		gain   float64
+	}{
+		{0, 0}, {20, 0.008}, {50, 0.125}, {80, 0.512}, {100, 1},
+	} {
+		t.Run(fmt.Sprintf("volume %d", tc.volume), func(t *testing.T) {
+			out := &fakeOutput{}
+			opener := func(ctx context.Context) (Stream, beep.Format, error) {
+				return &constStream{remain: 4096, value: 1}, format44100, nil
+			}
+			engine := NewEngine(out, 44100, opener,
+				WithVolume(tc.volume), WithChunkFrames(256), WithBackoff(time.Millisecond, 4*time.Millisecond))
+			engine.Play()
+			defer engine.Stop()
 
-	waitFor(t, "audio", func() bool { return len(out.written()) >= 512 })
-	got := out.written()
-	// Volume 50 on the cubic curve is a gain of 0.125.
-	if got[0] != 0.125 {
-		t.Fatalf("first sample = %v; want 0.125 (volume 50)", got[0])
-	}
-	waitFor(t, "playing state", func() bool { return engine.Status().State == StatePlaying })
-	if volume := engine.Status().Volume; volume != 50 {
-		t.Fatalf("volume = %d; want 50", volume)
+			waitFor(t, "audio", func() bool { return len(out.written()) >= 512 })
+			if got := float64(out.written()[0]); math.Abs(got-tc.gain) > 1e-6 {
+				t.Fatalf("gain = %v; want %v (volume %d)", got, tc.gain, tc.volume)
+			}
+			if volume := engine.Status().Volume; volume != tc.volume {
+				t.Fatalf("volume = %d; want %d", volume, tc.volume)
+			}
+		})
 	}
 }
 
-func TestEnginePauseWritesSilenceAndResumeFlushes(t *testing.T) {
+func TestEnginePauseDropsQueuedAudioAndResumeFlushes(t *testing.T) {
 	out := &fakeOutput{pace: time.Millisecond}
 	opener := func(ctx context.Context) (Stream, beep.Format, error) {
 		return &constStream{remain: 1 << 30, value: 1}, format44100, nil
@@ -136,8 +170,39 @@ func TestEnginePauseWritesSilenceAndResumeFlushes(t *testing.T) {
 		return len(got) >= 128 && got[0] == 1
 	})
 
+	// Pause must flush queued audio before the silence: without it, up to
+	// the ring's half second would keep playing after Pause.
+	out.clearOps()
 	engine.Pause()
 	waitFor(t, "paused state", func() bool { return engine.Status().State == StatePaused })
+	waitFor(t, "pause flush", func() bool {
+		for _, op := range out.timeline() {
+			if op == "flush" {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "silence after pause", func() bool {
+		for _, op := range out.timeline() {
+			if op == "write:silence" {
+				return true
+			}
+		}
+		return false
+	})
+	ops := out.timeline()
+	flushed := false
+	for i, op := range ops {
+		if op == "flush" {
+			flushed = true
+			continue
+		}
+		if flushed && op != "write:silence" {
+			t.Fatalf("op %d after pause flush = %q (%v); want only silence", i, op, ops)
+		}
+	}
+
 	time.Sleep(20 * time.Millisecond)
 	mark := len(out.written())
 	time.Sleep(30 * time.Millisecond)
@@ -151,13 +216,30 @@ func TestEnginePauseWritesSilenceAndResumeFlushes(t *testing.T) {
 		}
 	}
 
-	engine.Play() // resume
+	// Resume must flush the buffered silence before the first real audio.
+	out.clearOps()
+	engine.Play()
 	waitFor(t, "playing state", func() bool { return engine.Status().State == StatePlaying })
-	waitFor(t, "flush on resume", func() bool { return out.flushCount() > 0 })
 	waitFor(t, "audio after resume", func() bool {
 		got := out.written()
 		return len(got) > 0 && got[len(got)-1] == 1
 	})
+	ops = out.timeline()
+	flushAt, audioAt := -1, -1
+	for i, op := range ops {
+		if op == "flush" && flushAt < 0 {
+			flushAt = i
+		}
+		if op == "write:audio" && audioAt < 0 {
+			audioAt = i
+		}
+	}
+	if flushAt < 0 {
+		t.Fatalf("no flush after resume: %v", ops)
+	}
+	if audioAt < 0 || flushAt > audioAt {
+		t.Fatalf("resume ops = %v; want a flush before the first audio write", ops)
+	}
 }
 
 func TestEngineReconnectsAfterOpenerErrors(t *testing.T) {
