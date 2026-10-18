@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofrs/flock"
 
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/audio"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/config"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/mpv"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/platform"
@@ -29,6 +30,9 @@ const (
 	lockWait                 = 10 * time.Second
 	stopConfirmTimeout       = 2 * time.Second
 	stopConfirmInterval      = 100 * time.Millisecond
+	// spectrumTimeout bounds one band poll: the panel drops a missed tick
+	// rather than queueing stale visuals.
+	spectrumTimeout = 500 * time.Millisecond
 )
 
 // replyLimit caps one reply line, mirroring the mpv client's 64 KiB
@@ -192,6 +196,28 @@ func (c *Client) SetOutput(ctx context.Context, device string) (player.State, er
 		return c.neutral(), err
 	}
 	return c.action(ctx, CmdOutput, args)
+}
+
+// Spectrum polls the backend's latest band levels. It never attaches or
+// starts a service (the panel polls it only while playing, which implies one
+// is up); a backend without a sample tap reports audio.ErrSpectrumUnavailable
+// so callers fall back to decorative visuals instead of retrying.
+func (c *Client) Spectrum(ctx context.Context) (audio.Snapshot, error) {
+	reply, err := c.call(ctx, Request{Cmd: CmdSpectrum, Proto: Protocol}, spectrumTimeout)
+	if err != nil {
+		return audio.Snapshot{}, err
+	}
+	if !reply.OK {
+		if reply.Code == CodeUnsupported {
+			return audio.Snapshot{}, audio.ErrSpectrumUnavailable
+		}
+		return audio.Snapshot{}, replyError(reply)
+	}
+	var snap audio.Snapshot
+	if err := json.Unmarshal(reply.Result, &snap); err != nil {
+		return audio.Snapshot{}, err
+	}
+	return snap, nil
 }
 
 // Stop stops playback and shuts the service down. The request is the

@@ -142,7 +142,7 @@ func (p *Player) Volume(ctx context.Context, volume int) (State, error) {
 	if err := p.setProperty(ctx, "volume", v); err != nil {
 		return p.Status(ctx), fmt.Errorf("set volume: %w", err)
 	}
-	if err := p.rememberVolume(v); err != nil {
+	if err := rememberVolume(p.store, v); err != nil {
 		return p.Status(ctx), fmt.Errorf("save volume: %w", err)
 	}
 	return p.Status(ctx), nil
@@ -181,7 +181,7 @@ func (p *Player) SetOutput(ctx context.Context, device string) (State, error) {
 			return p.Status(ctx), err
 		}
 	}
-	if err := p.rememberOutput(device); err != nil {
+	if err := rememberOutput(p.store, device); err != nil {
 		return p.Status(ctx), fmt.Errorf("save output: %w", err)
 	}
 	return p.Status(ctx), nil
@@ -374,22 +374,25 @@ func NeutralState(store Store) State {
 	return State{Volume: vol, Output: s.Output}
 }
 
-func (p *Player) rememberVolume(v int) error {
-	s, err := p.store.Load()
+// rememberVolume persists the chosen volume; the engine player and the mpv
+// player share it so both backends treat settings identically.
+func rememberVolume(store Store, v int) error {
+	s, err := store.Load()
 	if err != nil {
 		return err
 	}
 	s.Volume = &v
-	return p.store.Save(s)
+	return store.Save(s)
 }
 
-func (p *Player) rememberOutput(device string) error {
-	s, err := p.store.Load()
+// rememberOutput persists the chosen output device.
+func rememberOutput(store Store, device string) error {
+	s, err := store.Load()
 	if err != nil {
 		return err
 	}
 	s.Output = device
-	return p.store.Save(s)
+	return store.Save(s)
 }
 
 func clamp(volume int) int {

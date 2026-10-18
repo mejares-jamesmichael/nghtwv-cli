@@ -38,6 +38,10 @@ const (
 	CmdVolume  = "volume"
 	CmdOutputs = "outputs"
 	CmdOutput  = "output"
+	// CmdSpectrum reports the backend's latest band levels. It is additive:
+	// a backend without a sample tap answers CodeUnsupported, which older
+	// clients never ask for.
+	CmdSpectrum = "spectrum"
 )
 
 // Reply codes. An empty code means the error text came from the backend
@@ -47,6 +51,10 @@ const (
 	CodeBadRequest       = "bad_request"
 	CodeUnknownCommand   = "unknown_command"
 	CodeBackend          = "backend"
+	// CodeUnsupported reports a verb the current backend cannot serve (the
+	// mpv backend has no sample tap for "spectrum"); clients degrade instead
+	// of surfacing an error.
+	CodeUnsupported = "unsupported"
 )
 
 // Request is one request line: newline-delimited JSON over the endpoint.
@@ -58,8 +66,8 @@ type Request struct {
 }
 
 // Reply is one reply line. Result carries the verb's payload: a
-// player.State for the transport verbs, an OutputsResult for outputs,
-// nothing for stop.
+// player.State for the transport verbs, an OutputsResult for outputs, an
+// audio.Snapshot for spectrum, nothing for stop.
 type Reply struct {
 	ID     int64           `json:"id"`
 	OK     bool            `json:"ok"`

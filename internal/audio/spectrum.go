@@ -2,6 +2,7 @@ package audio
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sync"
 	"time"
@@ -22,10 +23,21 @@ const (
 // Snapshot is the latest spectrum analysis: Bands holds 0..1 levels from low
 // to high frequency, Level is the overall loudness (0..1). It reflects the
 // audio before volume gain, so visuals do not vanish when the volume is low.
+// This is the payload of the service's "spectrum" verb; Bands is empty until
+// the first analysis window lands.
 type Snapshot struct {
-	Bands []float32
-	Level float32
+	Bands []float32 `json:"bands"`
+	Level float32   `json:"level"`
 }
+
+// ErrSpectrumUnavailable reports a backend that has no sample tap: the mpv
+// backend answers "unsupported" over the service protocol, and callers fall
+// back to decorative visuals instead of retrying.
+var ErrSpectrumUnavailable = errors.New("audio: spectrum unavailable")
+
+// Bands reports how many log-spaced levels every Snapshot carries, so
+// clients can lay out visuals without hardcoding the count.
+func Bands() int { return spectrumBands }
 
 // Spectrum turns tapped PCM into band levels off the playback path. All
 // analysis state is guarded by one mutex, so a restarted analyzer can never

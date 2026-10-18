@@ -193,6 +193,20 @@ func (s *Server) dispatch(line []byte) ([]byte, bool) {
 		}
 		st, err := s.backend.SetOutput(ctx, args.Device)
 		return s.stateReply(req.ID, st, err), false
+	case CmdSpectrum:
+		// Optional backend capability: without a sample tap the reply is a
+		// definite "unsupported" so clients stop asking.
+		provider, ok := s.backend.(SpectrumProvider)
+		if !ok {
+			return mustJSON(Reply{
+				ID: req.ID, Proto: s.proto, Code: CodeUnsupported,
+				Error: "spectrum is not supported by this backend",
+			}), false
+		}
+		return mustJSON(Reply{
+			ID: req.ID, OK: true, Proto: s.proto,
+			Result: mustJSON(provider.Spectrum()),
+		}), false
 	default:
 		return mustJSON(Reply{
 			ID: req.ID, Proto: s.proto, Code: CodeUnknownCommand,

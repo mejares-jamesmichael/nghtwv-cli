@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/audio"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/mpv"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
 )
@@ -20,4 +21,13 @@ type Backend interface {
 	Volume(ctx context.Context, volume int) (player.State, error)
 	Outputs(ctx context.Context) ([]mpv.Device, error)
 	SetOutput(ctx context.Context, device string) (player.State, error)
+}
+
+// SpectrumProvider is the optional backend extension behind the "spectrum"
+// verb: backends with a real sample tap (the engine) implement it, the mpv
+// backend does not and the server answers CodeUnsupported.
+type SpectrumProvider interface {
+	// Spectrum returns the latest band levels; it does no work beyond a
+	// copy, so callers may poll it at frame cadence.
+	Spectrum() audio.Snapshot
 }

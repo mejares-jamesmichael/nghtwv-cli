@@ -138,31 +138,48 @@ func (m Model) progressBar() string {
 	return barStyle.Render(line) + dimStyle.Render(" "+seconds(m.posNow)+" / "+seconds(m.posLen))
 }
 
-// meterBand is the decorative wave: sine-ish tilts around the midline,
-// phase-advanced only while playing (gated on real playback). The band
-// freezes into the faint midline when idle/paused, like the panel canvas.
-func meterBand(cols int, phase float64, live bool) string {
+// meterBand renders the meter: the backend's real band levels when its
+// sample tap answers, else the decorative wave: sine-ish tilts around the
+// midline, phase-advanced only while playing (gated on real playback). The
+// band freezes into the faint midline when idle/paused, like the panel
+// canvas.
+func meterBand(cols int, phase float64, live bool, bands []float32) string {
 	if cols <= 0 {
 		return ""
 	}
 	if !live {
 		return calmStyle.Render(strings.Repeat("▁", cols))
 	}
+	if len(bands) > 0 {
+		return spectrumBand(cols, bands)
+	}
 	runes := make([]rune, 0, cols)
 	for x := 0; x < cols; x++ {
-		// Blend a couple of spatial frequencies; "levels[]" would replace
-		// this faux amp with real data (decorative until then).
+		// Blend a couple of spatial frequencies; the engine backend feeds
+		// real levels instead (bands), this faux amp is the fallback.
 		v := 0.55*((mathSin(0.32*float64(x)+phase)+1)/2) + 0.45*((mathSin(0.09*float64(x)-phase*0.6)+1)/2)
 		runes = append(runes, waveGlyph(v))
 	}
 	return waveStyle.Render(string(runes))
 }
 
-// waveGlyph maps a normalized 0..1 amplitude into the shade ladder.
+// spectrumBand draws the backend's log-spaced band levels across cols
+// glyphs, resampling by nearest band so any panel width works.
+func spectrumBand(cols int, bands []float32) string {
+	runes := make([]rune, 0, cols)
+	for x := 0; x < cols; x++ {
+		runes = append(runes, waveGlyph(max(0, min(1, float64(bands[x*len(bands)/cols])))))
+	}
+	return waveStyle.Render(string(runes))
+}
+
+// waveGlyph maps a normalized 0..1 amplitude into the shade ladder. The
+// ladder is indexed as runes: the glyphs are multi-byte, so a byte index
+// would slice them into control characters.
 func waveGlyph(v float64) rune {
-	const shades = "▁▂▃▄▅▆▇█"
-	i := max(0, min(len(shades)-1, int(v*float64(len(shades)))))
-	return rune(shades[i])
+	ladder := []rune("▁▂▃▄▅▆▇█")
+	i := max(0, min(len(ladder)-1, int(v*float64(len(ladder)))))
+	return ladder[i]
 }
 
 // pickerStatus is the one-line state rendered under the device list (or ""
@@ -323,7 +340,7 @@ func (m Model) View() tea.View {
 		right = append(right, bar)
 	}
 	right = append(right, "")
-	right = append(right, meterBand(max(16, w-2), m.wavePhase, m.st.Playing && !m.st.Paused))
+	right = append(right, meterBand(max(16, w-2), m.wavePhase, m.st.Playing && !m.st.Paused, m.bands))
 	if m.liveErr != "" {
 		right = append(right, errStyle.Render(limitLines(wrapToWidth("mpv: "+m.liveErr, w), 2)))
 	}

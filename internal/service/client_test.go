@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/audio"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/config"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
 )
@@ -310,4 +311,41 @@ func inertEndpoint(t *testing.T) string {
 		}
 	}()
 	return ln.Addr().String()
+}
+
+func TestClientSpectrum(t *testing.T) {
+	snap := audio.Snapshot{Bands: []float32{0.1, 0.9}, Level: 0.4}
+	addr, _ := testServer(t, &spectrumBackend{fakeBackend: &fakeBackend{}, snap: snap}, 0)
+
+	got, err := testClient(t, addr).Spectrum(context.Background())
+	if err != nil {
+		t.Fatalf("Spectrum: %v", err)
+	}
+	if len(got.Bands) != 2 || got.Bands[1] != 0.9 || got.Level != 0.4 {
+		t.Fatalf("snapshot = %+v, want %+v", got, snap)
+	}
+}
+
+func TestClientSpectrumUnavailableOnMPVBackend(t *testing.T) {
+	addr, _ := testServer(t, &fakeBackend{}, 0)
+	if _, err := testClient(t, addr).Spectrum(context.Background()); !errors.Is(err, audio.ErrSpectrumUnavailable) {
+		t.Fatalf("err = %v, want audio.ErrSpectrumUnavailable", err)
+	}
+}
+
+func TestClientSpectrumNeverStartsAService(t *testing.T) {
+	spawns := 0
+	client := NewClient(Config{
+		Endpoint: "nowhere",
+		LockPath: filepath.Join(t.TempDir(), "service.lock"),
+		Dial:     func(context.Context) (net.Conn, error) { return nil, errors.New("no service") },
+		Spawn:    func(context.Context) (Process, error) { spawns++; return &fakeProc{}, nil },
+		Store:    fakeStore{},
+	})
+	if _, err := client.Spectrum(context.Background()); err == nil {
+		t.Fatal("Spectrum without a service must fail")
+	}
+	if spawns != 0 {
+		t.Fatalf("spawns = %d, want 0: a band poll never starts a service", spawns)
+	}
 }

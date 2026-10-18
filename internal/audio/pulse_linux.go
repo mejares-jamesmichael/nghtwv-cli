@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/jfreymuth/pulse"
+	"github.com/jfreymuth/pulse/proto"
 )
 
 // pulseOutput implements Output on top of the PulseAudio protocol. On modern
@@ -185,6 +186,36 @@ func (o *pulseOutput) Underflow() bool {
 	o.mu.Unlock()
 	return starved || (stream != nil && stream.Underflow())
 }
+
+// Move reroutes the open stream to another sink without closing it (the
+// server's move-sink-input), so switching devices keeps playing without a
+// gap. It is the PulseAudio fast path behind audio.Mover.
+func (o *pulseOutput) Move(device string) error {
+	o.mu.Lock()
+	stream, closed := o.stream, o.closed
+	o.mu.Unlock()
+	if stream == nil || closed {
+		return ErrClosed
+	}
+	sink, err := o.resolve(device)
+	if err != nil {
+		return err
+	}
+	req := proto.MoveSinkInput{
+		SinkInputIndex: stream.StreamInputIndex(),
+		DeviceIndex:    sink.SinkIndex(),
+	}
+	if err := o.client.RawRequest(&req, &moveSinkInputReply{}); err != nil {
+		return fmt.Errorf("audio: move to %q: %w", device, err)
+	}
+	return nil
+}
+
+// moveSinkInputReply decodes the field-less acknowledgement of
+// move-sink-input; the library models no reply type for that op.
+type moveSinkInputReply struct{}
+
+func (*moveSinkInputReply) IsReplyTo() uint32 { return proto.OpMoveSinkInput }
 
 func (o *pulseOutput) Close() error {
 	o.mu.Lock()

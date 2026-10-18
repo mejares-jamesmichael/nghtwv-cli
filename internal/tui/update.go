@@ -2,11 +2,13 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/audio"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/plaza"
 )
@@ -53,11 +55,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Every(progressTick, everyProgress)
 
 	case meterTickMsg:
-		// Gated on real playback: paused/idle keeps the band settled.
+		// Gated on real playback: paused/idle keeps the band settled. A
+		// backend with a sample tap is polled here (one request in flight,
+		// latest wins); otherwise the decorative phase keeps advancing.
 		if m.st.Playing && !m.st.Paused {
 			m.wavePhase += 0.35
+			if src, ok := m.play.(SpectrumSource); ok && !m.spectrumOff && !m.spectrumBusy {
+				m.spectrumBusy = true
+				return m, tea.Batch(spectrumPoll(src), tea.Every(meterTick, everyMeter))
+			}
 		}
 		return m, tea.Every(meterTick, everyMeter)
+
+	case spectrumMsg:
+		m.spectrumBusy = false
+		if errors.Is(msg.err, audio.ErrSpectrumUnavailable) {
+			// The backend has no tap (mpv): stop asking, keep the wave.
+			m.spectrumOff = true
+			m.bands = nil
+			return m, nil
+		}
+		if msg.err == nil && m.st.Playing && !m.st.Paused {
+			m.bands = msg.snap.Bands
+			m.bandLevel = msg.snap.Level
+		}
+		return m, nil
 
 	case statusMsg:
 		m.liveErr = ""

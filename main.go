@@ -20,6 +20,7 @@ import (
 
 	"charm.land/bubbletea/v2"
 
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/audio"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/config"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/mpv"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/platform"
@@ -380,10 +381,26 @@ func runTUI(stdout, stderr io.Writer) int {
 	return 1
 }
 
+// Backend selection and the test-only stream override. mpv is the default on
+// every platform until the engine's per-OS runtime gate passes; the engine
+// is opt-in through the environment, and because the backend belongs to the
+// service process, changing it takes effect after `nghtwv stop`.
+const (
+	backendEnv = "NGHTWV_BACKEND"
+	streamEnv  = "NGHTWV_STREAM_URL"
+
+	// engineRate is the engine's render rate: the output negotiates this
+	// rate and PlazaOpener resamples the stream when it differs.
+	engineRate = 44100
+)
+
 // newPlayback resolves the service endpoint and lock and wires the client
 // the one-shots and the panel drive. The service is attached — or started
 // detached — on the first verb that needs it.
 func newPlayback() (*service.Client, error) {
+	if _, err := backendName(); err != nil {
+		return nil, err
+	}
 	endpoint, err := platform.ServiceEndpointPath()
 	if err != nil {
 		return nil, fmt.Errorf("resolve service endpoint: %w", err)
@@ -399,13 +416,37 @@ func newPlayback() (*service.Client, error) {
 	}), nil
 }
 
-// newBackend wires the backend the service dispatches onto: the mpv-backed
-// player (the only backend in this stage; the built-in audio engine lands
-// behind the same seam next). The remembered device is passed to the mpv
-// spawn config so it starts on it (parity: --audio-device at launch); if
-// the device vanished the player falls back to auto and a later SetOutput
-// fixes the record.
-func newBackend() (*player.Player, error) {
+// backendName validates the NGHTWV_BACKEND selection (empty means mpv).
+// Both the service and the clients validate it, so a typo reports the same
+// error instead of surfacing as an unexplained failed handshake.
+func backendName() (string, error) {
+	switch name := os.Getenv(backendEnv); name {
+	case "":
+		return "mpv", nil
+	case "mpv", "engine":
+		return name, nil
+	default:
+		return "", fmt.Errorf("unknown %s %q: use \"engine\" or \"mpv\"", backendEnv, name)
+	}
+}
+
+// newBackend wires the backend the service dispatches onto.
+func newBackend() (service.Backend, error) {
+	name, err := backendName()
+	if err != nil {
+		return nil, err
+	}
+	if name == "engine" {
+		return newEngineBackend(), nil
+	}
+	return newMPVBackend()
+}
+
+// newMPVBackend wires the parity backend: the mpv-backed player. The
+// remembered device is passed to the mpv spawn config so it starts on it
+// (parity: --audio-device at launch); if the device vanished the player
+// falls back to auto and a later SetOutput fixes the record.
+func newMPVBackend() (*player.Player, error) {
 	endpoint, err := platform.EndpointPath()
 	if err != nil {
 		return nil, fmt.Errorf("resolve IPC endpoint: %w", err)
@@ -421,10 +462,30 @@ func newBackend() (*player.Player, error) {
 	sup := mpv.NewSupervisor(mpv.ProcessConfig{
 		Endpoint:    endpoint,
 		LockPath:    lock,
-		StreamURL:   player.StreamURL,
+		StreamURL:   streamURL(),
 		AudioDevice: settings.Output,
 	}, mpv.NewDialer(endpoint))
 	return player.New(sup.Client(), sup, config.Store{}), nil
+}
+
+// newEngineBackend wires the built-in engine: the Plaza stream decoded
+// in-process, Plaza metadata as the reported title (the engine has no
+// media-title property), and backend connections created lazily — the
+// service starts without a sound server, and a device switch opens its own
+// connection rather than reusing one the engine still writes into.
+func newEngineBackend() service.Backend {
+	newOut := func() (audio.Output, error) { return audio.NewOutput(engineRate) }
+	return player.NewEnginePlayer(newOut, engineRate, audio.PlazaOpener(streamURL()), config.Store{}, newPlaza())
+}
+
+// streamURL is the Plaza stream, overridable for tests (NGHTWV_STREAM_URL):
+// reconnect and buffering are hard to exercise against a healthy stream, but
+// trivial against a bogus host.
+func streamURL() string {
+	if v := strings.TrimSpace(os.Getenv(streamEnv)); v != "" {
+		return v
+	}
+	return player.StreamURL
 }
 
 func writeJSON(w io.Writer, v any) error {

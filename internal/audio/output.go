@@ -35,6 +35,17 @@ type ErrReporter interface {
 	Err() error
 }
 
+// Mover is implemented by outputs that can reroute an open stream to another
+// device without recreating it (PulseAudio's move-sink-input), so switching
+// devices keeps playing seamlessly. Outputs without it are switched by
+// opening a fresh output on the new device instead.
+type Mover interface {
+	// Move reroutes the open stream to the named device. An empty name
+	// selects the backend default. It fails with ErrNoDevice when the
+	// device does not exist and ErrClosed when nothing is open.
+	Move(device string) error
+}
+
 // Output renders interleaved stereo float32 frames at a fixed sample rate.
 //
 // Backpressure: implementations buffer roughly half a second of audio

@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/audio"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/mpv"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/plaza"
@@ -49,6 +50,14 @@ type Playback interface {
 	Volume(ctx context.Context, volume int) (player.State, error)
 	SetOutput(ctx context.Context, device string) (player.State, error)
 	Outputs(ctx context.Context) ([]mpv.Device, error)
+}
+
+// SpectrumSource is optionally implemented by the playback seam when the
+// backend has a real sample tap (the engine). The panel polls it on the
+// meter tick and renders real band levels; without it — or on any failure —
+// the decorative wave stays.
+type SpectrumSource interface {
+	Spectrum(ctx context.Context) (audio.Snapshot, error)
 }
 
 // MetaSource is the Plaza data surface the panel consumes (history shares
@@ -109,9 +118,16 @@ type Model struct {
 	artworkFailed bool
 	truecolor     bool
 
-	// Decorative meter: a free-running phase, advanced only while playing
-	// (gated on real playback); levels[] is the future data source seam.
-	wavePhase float64
+	// Meter: the backend's latest band levels when its sample tap answers
+	// (engine backend), else the decorative wave. The phase is free-running
+	// and advances only while playing (gated on real playback); spectrumOff
+	// latches "this backend has no tap" so the panel stops asking, and
+	// spectrumBusy keeps one poll in flight at a time.
+	wavePhase    float64
+	bands        []float32
+	bandLevel    float32
+	spectrumOff  bool
+	spectrumBusy bool
 
 	// Help overlay toggles with ?.
 	helpOpen bool
@@ -177,8 +193,15 @@ type historyTickMsg time.Time
 // progressTickMsg fires every 1 s → extrapolated progress.
 type progressTickMsg time.Time
 
-// meterTickMsg fires every 100 ms → decorative meter advance.
+// meterTickMsg fires every 100 ms → meter advance (real bands or the
+// decorative wave).
 type meterTickMsg struct{}
+
+// spectrumMsg carries one band poll's result.
+type spectrumMsg struct {
+	snap audio.Snapshot
+	err  error
+}
 
 func statusPoll(p Playback) tea.Cmd {
 	// Status never errors (player parity: failures collapse to the
@@ -216,6 +239,18 @@ func outputsPoll(p Playback) tea.Cmd {
 		defer cancel()
 		devices, err := p.Outputs(ctx)
 		return outputsMsg{devices: devices, err: err}
+	}
+}
+
+// spectrumPoll reads the backend's latest band levels (a sample tap when the
+// backend has one). Bounded tightly: a missed tick is better than stale
+// visuals catching up.
+func spectrumPoll(src SpectrumSource) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		snap, err := src.Spectrum(ctx)
+		return spectrumMsg{snap: snap, err: err}
 	}
 }
 

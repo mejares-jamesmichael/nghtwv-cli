@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mejares-jamesmichael/nghtwv-cli/internal/audio"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/mpv"
 	"github.com/mejares-jamesmichael/nghtwv-cli/internal/player"
 )
@@ -273,5 +274,50 @@ func TestServerContextCancelShutsDown(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a cancelled context must shut the server down")
+	}
+}
+
+// spectrumBackend adds the optional sample tap on top of the fake backend.
+type spectrumBackend struct {
+	*fakeBackend
+	snap audio.Snapshot
+}
+
+func (s *spectrumBackend) Spectrum() audio.Snapshot {
+	s.record("spectrum")
+	return s.snap
+}
+
+func TestServerSpectrumVerb(t *testing.T) {
+	snap := audio.Snapshot{Bands: []float32{0, 0.5, 1}, Level: 0.25}
+	backend := &spectrumBackend{fakeBackend: &fakeBackend{}, snap: snap}
+	addr, _ := testServer(t, backend, 0)
+
+	reply := rawCall(t, addr, `{"id":7,"proto":1,"cmd":"spectrum"}`)
+	if !reply.OK {
+		t.Fatalf("spectrum reply = %+v, want ok", reply)
+	}
+	var got audio.Snapshot
+	if err := json.Unmarshal(reply.Result, &got); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if len(got.Bands) != len(snap.Bands) || got.Bands[1] != 0.5 || got.Level != 0.25 {
+		t.Fatalf("snapshot = %+v, want %+v", got, snap)
+	}
+	if got := backend.called(); len(got) != 1 || got[0] != "spectrum" {
+		t.Fatalf("backend calls = %v, want [spectrum]", got)
+	}
+}
+
+func TestServerSpectrumUnsupportedWithoutTap(t *testing.T) {
+	backend := &fakeBackend{}
+	addr, _ := testServer(t, backend, 0)
+
+	reply := rawCall(t, addr, `{"id":8,"proto":1,"cmd":"spectrum"}`)
+	if reply.OK || reply.Code != CodeUnsupported {
+		t.Fatalf("reply = %+v, want a definite %q refusal", reply, CodeUnsupported)
+	}
+	if got := backend.called(); len(got) != 0 {
+		t.Fatalf("backend calls = %v, want none", got)
 	}
 }
